@@ -2,14 +2,15 @@
 
 Open-vocabulary perception scaffold for a ROS2 + YOLO-World visual grasping project.
 
-The current implementation covers the first three milestones:
+The current implementation covers the first four milestones:
 
 1. publish images from a local camera or video file;
 2. run YOLO-World with a text prompt such as `cup,bottle,box`;
 3. publish detections as `vision_msgs/Detection2DArray`;
 4. convert detections plus aligned depth into 3D target points;
 5. transform target points into `base_link` through TF2;
-6. run an Isaac Sim scene that publishes simulated RGB-D data and accepts Panda joint commands.
+6. run an Isaac Sim scene that publishes simulated RGB-D data and accepts Panda joint commands;
+7. execute a lightweight semantic grasp demo from `/localized_objects`.
 
 Target runtime:
 
@@ -27,6 +28,7 @@ vision-guided-grasping/
 +-- ros2_ws/
 |   +-- src/
 |       +-- camera_source/
+|       +-- grasp_execution/
 |       +-- localization/
 |       +-- sim_control/
 |       +-- yolo_world_ros/
@@ -34,6 +36,7 @@ vision-guided-grasping/
 |   +-- stage1_perception.md
 |   +-- stage2_localization.md
 |   +-- stage3_isaac_sim.md
+|   +-- stage4_grasp_execution.md
 +-- sim/
 |   +-- isaac/
 |       +-- stage3_scene.py
@@ -84,6 +87,15 @@ Isaac Sim subscribes:
 
 - `/joint_command` (`sensor_msgs/msg/JointState`)
 
+`grasp_execution` subscribes:
+
+- `/localized_objects` (`vision_msgs/msg/Detection3DArray`)
+
+`grasp_execution` publishes:
+
+- `/joint_command` (`sensor_msgs/msg/JointState`)
+- `/grasp/status` (`std_msgs/msg/String`)
+
 Core `yolo_world_ros` parameters:
 
 - `text_prompt`: comma-separated text classes, for example `cup,bottle,box`
@@ -107,6 +119,13 @@ Core `sim_control` parameters:
 - `publish_rate_hz`: default `10.0`
 - `hold_seconds`: seconds to hold each preset when cycling
 
+Core `grasp_execution` parameters:
+
+- `target_label`: semantic target label, or empty for the first localized object
+- `auto_start`: start the grasp demo as soon as a matching target arrives
+- `state_hold_seconds`: seconds to hold each demo state
+- `joint_command_topic`: default `/joint_command`
+
 ## WSL2 Setup
 
 Install ROS2 Humble and common dependencies in Ubuntu 22.04:
@@ -119,6 +138,7 @@ sudo apt install -y \
   ros-humble-vision-msgs \
   ros-humble-tf2-ros \
   ros-humble-tf2-msgs \
+  ros-humble-std-msgs \
   python3-colcon-common-extensions \
   python3-pip
 ```
@@ -261,6 +281,27 @@ ros2 run sim_control panda_joint_demo_node \
   -p hold_seconds:=3.0
 ```
 
+## Run Stage 4 Grasp Execution
+
+Run after Isaac Sim, perception, and localization are publishing `/localized_objects`:
+
+```bash
+ros2 run grasp_execution simple_grasp_executor_node \
+  --ros-args \
+  -p localized_objects_topic:=/localized_objects \
+  -p joint_command_topic:=/joint_command \
+  -p status_topic:=/grasp/status \
+  -p target_label:=cube \
+  -p auto_start:=true
+```
+
+Inspect progress:
+
+```bash
+ros2 topic echo /grasp/status
+ros2 topic echo /joint_command --once
+```
+
 ## Run With YOLO-World
 
 ```bash
@@ -286,6 +327,8 @@ cd ../localization
 python3 -m pytest
 cd ../sim_control
 python3 -m pytest
+cd ../grasp_execution
+python3 -m pytest
 ```
 
 ## Completed Stages
@@ -293,16 +336,17 @@ python3 -m pytest
 - Stage 1: ROS2 image ingestion, YOLO-World wrapper, 2D detections, and debug image output.
 - Stage 2: RGB-D center-point localization, CameraInfo projection, TF transform into `base_link`, and 3D detection output.
 - Stage 3: Isaac Sim scene scaffold, ROS2 bridge topic design, simulated RGB-D source, TF, joint states, and Panda joint command demo.
+- Stage 4: Lightweight semantic grasp state machine that consumes `/localized_objects` and publishes `/joint_command`.
 
 ## Unfinished Work
 
-Stage 4 will add grasp planning and execution:
+The current grasp execution is a lightweight demo. The production version still needs:
 
-- consume `/localized_objects` as the semantic target source;
-- generate a simple top-down pre-grasp and grasp pose;
-- add a planning/execution node that sends the arm through approach, descend, close gripper, lift, and retreat steps;
-- decide whether to use a lightweight Isaac-side controller first or integrate MoveIt2 directly;
-- add success/failure logging for target not found, invalid depth, missing TF, unreachable pose, and execution timeout.
+- IK from object pose to joint-space goals;
+- MoveIt2 or another planner for collision-aware motion;
+- a real gripper command topic and grasp closure handling;
+- object attachment or physics-based pickup validation;
+- robust timeout, recovery, and retry policies.
 
 Stage 5 can add a small Sim2Real robustness experiment:
 
