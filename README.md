@@ -2,7 +2,7 @@
 
 Open-vocabulary perception scaffold for a ROS2 + YOLO-World visual grasping project.
 
-The current implementation covers the first four milestones:
+The current implementation covers the first five milestones:
 
 1. publish images from a local camera or video file;
 2. run YOLO-World with a text prompt such as `cup,bottle,box`;
@@ -10,16 +10,18 @@ The current implementation covers the first four milestones:
 4. convert detections plus aligned depth into 3D target points;
 5. transform target points into `base_link` through TF2;
 6. run an Isaac Sim scene that publishes simulated RGB-D data and accepts Panda joint commands;
-7. execute a lightweight semantic grasp demo from `/localized_objects`.
+7. execute a lightweight semantic grasp demo from `/localized_objects`;
+8. generate domain-randomized simulation trials and summarize detection/localization robustness.
 
 Target runtime:
 
 - WSL2 Ubuntu 22.04
 - ROS2 Humble
 - Python 3.10
+- Isaac Sim 4.5 on Windows for simulation stages
 - Official YOLO-World repository and checkpoints
 
-The current Windows workspace is only used to author the project. Build and runtime commands should be executed inside WSL2/Ubuntu.
+The current Windows workspace is only used to author the project. Build and runtime commands should be executed inside WSL2/Ubuntu, while Isaac Sim scripts run from the Windows Isaac Sim Python environment.
 
 ## Repository Layout
 
@@ -30,6 +32,7 @@ vision-guided-grasping/
 |       +-- camera_source/
 |       +-- grasp_execution/
 |       +-- localization/
+|       +-- sim2real_eval/
 |       +-- sim_control/
 |       +-- yolo_world_ros/
 +-- docs/
@@ -37,9 +40,11 @@ vision-guided-grasping/
 |   +-- stage2_localization.md
 |   +-- stage3_isaac_sim.md
 |   +-- stage4_grasp_execution.md
+|   +-- stage5_sim2real_eval.md
 +-- sim/
 |   +-- isaac/
 |       +-- stage3_scene.py
+|       +-- stage5_randomized_scene.py
 +-- scripts/
 ```
 
@@ -83,7 +88,7 @@ Isaac Sim subscribes:
 
 - `/joint_command` (`sensor_msgs/msg/JointState`)
 
-`sim_control` publishes:
+`sim_control` and `grasp_execution` publish:
 
 - `/joint_command` (`sensor_msgs/msg/JointState`)
 
@@ -93,38 +98,7 @@ Isaac Sim subscribes:
 
 `grasp_execution` publishes:
 
-- `/joint_command` (`sensor_msgs/msg/JointState`)
 - `/grasp/status` (`std_msgs/msg/String`)
-
-Core `yolo_world_ros` parameters:
-
-- `text_prompt`: comma-separated text classes, for example `cup,bottle,box`
-- `confidence_threshold`: minimum score for detections
-- `device`: `cuda:0` or `cpu`
-- `model_config`: YOLO-World config file path
-- `checkpoint_path`: YOLO-World checkpoint path
-- `mock_detector`: set `true` for ROS topic debugging without model files
-
-Core `localization` parameters:
-
-- `target_frame`: output frame, default `base_link`
-- `depth_window_size`: median depth window size around the bbox center
-- `min_depth_m` and `max_depth_m`: valid localization depth range
-- `sync_tolerance_sec`: max allowed timestamp difference between detections and depth
-
-Core `sim_control` parameters:
-
-- `preset`: `cycle`, `home`, `observe_table`, or `pre_grasp_demo`
-- `joint_command_topic`: default `/joint_command`
-- `publish_rate_hz`: default `10.0`
-- `hold_seconds`: seconds to hold each preset when cycling
-
-Core `grasp_execution` parameters:
-
-- `target_label`: semantic target label, or empty for the first localized object
-- `auto_start`: start the grasp demo as soon as a matching target arrives
-- `state_hold_seconds`: seconds to hold each demo state
-- `joint_command_topic`: default `/joint_command`
 
 ## WSL2 Setup
 
@@ -228,26 +202,15 @@ ros2 run localization object_localizer_node \
   -p max_depth_m:=3.0
 ```
 
-Inspect localized targets:
-
-```bash
-ros2 topic echo /localized_objects --once
-ros2 topic echo /debug/object_points --once
-```
-
 ## Run Stage 3 Isaac Sim Bridge
 
 Stage 3 uses Isaac Sim as the camera source. Do not run `camera_source` while the Isaac scene is publishing camera topics.
 
-Use the same ROS domain in Windows and WSL2. Example:
-
-PowerShell:
+Use the same ROS domain in Windows and WSL2:
 
 ```powershell
 $env:ROS_DOMAIN_ID="30"
 ```
-
-WSL2:
 
 ```bash
 export ROS_DOMAIN_ID=30
@@ -258,16 +221,6 @@ Start the Isaac Sim scene from an Isaac Sim Python environment on Windows:
 ```powershell
 cd C:\path\to\vision-guided-grasping
 & "C:\path\to\isaac-sim\python.bat" sim\isaac\stage3_scene.py
-```
-
-In WSL2, build and inspect bridge topics:
-
-```bash
-cd ros2_ws
-source /opt/ros/humble/setup.bash
-colcon build
-source install/setup.bash
-ros2 topic list | grep -E 'camera|joint|tf|clock'
 ```
 
 Drive the Panda through fixed joint presets:
@@ -302,6 +255,39 @@ ros2 topic echo /grasp/status
 ros2 topic echo /joint_command --once
 ```
 
+## Run Stage 5 Sim2Real Evaluation
+
+Generate deterministic randomized trial rows:
+
+```bash
+ros2 run sim2real_eval generate_trials -- \
+  --count 10 \
+  --seed 42 \
+  --target-label cube \
+  --output outputs/sim2real_trials.csv
+```
+
+Run one randomized Isaac scene from Windows:
+
+```powershell
+cd C:\path\to\vision-guided-grasping
+& "C:\path\to\isaac-sim\python.bat" sim\isaac\stage5_randomized_scene.py `
+  --trial-id 0 `
+  --seed 42 `
+  --target-label cube `
+  --save-usd outputs\stage5_trial_000.usd
+```
+
+After recording a result CSV, generate the Markdown robustness report:
+
+```bash
+ros2 run sim2real_eval summarize_results -- \
+  --input outputs/sim2real_results.csv \
+  --output outputs/sim2real_report.md
+```
+
+See `docs/stage5_sim2real_eval.md` for the trial schema and result-recording workflow.
+
 ## Run With YOLO-World
 
 ```bash
@@ -318,7 +304,7 @@ If the config, checkpoint, or YOLO-World dependencies are missing, the node logs
 
 ## Local Non-ROS Checks
 
-The pure Python tests avoid ROS2 and model dependencies:
+The pure Python tests avoid ROS2, Isaac Sim, and model dependencies:
 
 ```bash
 cd ros2_ws/src/yolo_world_ros
@@ -329,6 +315,8 @@ cd ../sim_control
 python3 -m pytest
 cd ../grasp_execution
 python3 -m pytest
+cd ../sim2real_eval
+python3 -m pytest
 ```
 
 ## Completed Stages
@@ -337,26 +325,15 @@ python3 -m pytest
 - Stage 2: RGB-D center-point localization, CameraInfo projection, TF transform into `base_link`, and 3D detection output.
 - Stage 3: Isaac Sim scene scaffold, ROS2 bridge topic design, simulated RGB-D source, TF, joint states, and Panda joint command demo.
 - Stage 4: Lightweight semantic grasp state machine that consumes `/localized_objects` and publishes `/joint_command`.
+- Stage 5: Offline Sim2Real randomization experiment, CSV metrics, and Markdown robustness reporting.
 
 ## Unfinished Work
 
-The current grasp execution is a lightweight demo. The production version still needs:
+The current project is now a full demonstration scaffold, not a production grasping stack. Remaining work:
 
-- IK from object pose to joint-space goals;
-- MoveIt2 or another planner for collision-aware motion;
-- a real gripper command topic and grasp closure handling;
-- object attachment or physics-based pickup validation;
-- robust timeout, recovery, and retry policies.
-
-Stage 5 can add a small Sim2Real robustness experiment:
-
-- randomize Isaac Sim lighting, object color/material, table texture, camera pose, and background;
-- record YOLO-World detection confidence and localization stability across randomized scenes;
-- summarize failure cases and practical transfer limits in `docs/`.
-
-Validation still required on the target runtime:
-
-- run `colcon build` in WSL2 Ubuntu 22.04 with ROS2 Humble;
-- run the Isaac Sim 4.5 scene on Windows and confirm all bridge topics are visible from WSL2;
-- verify Panda responds to `/joint_command`;
-- run the full stage 1 to stage 3 pipeline with Isaac camera data.
+- run `colcon build` and full runtime validation in WSL2 Ubuntu 22.04 with ROS2 Humble;
+- run Isaac Sim 4.5 on Windows and confirm all bridge topics are visible from WSL2;
+- validate the full stage 1 to stage 5 loop with real YOLO-World weights;
+- add automatic rosbag/result extraction for stage 5 instead of manual CSV recording;
+- compare randomized simulation results with real camera or real robot data;
+- add IK, MoveIt2 or another collision-aware planner, real gripper commands, and physics-based pickup validation.
